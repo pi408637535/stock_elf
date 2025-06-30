@@ -11,6 +11,9 @@ import time
 from datetime import datetime
 import sys
 import socket
+from pymysql.cursors import DictCursor
+import random
+
 class MySqlQuery():
     def __init__(self, env):
         self.localhost = '43.156.232.204' if env == 'local' else '127.0.0.1'
@@ -54,13 +57,17 @@ class MySqlQuery():
         sql = "update stock_db.sentry_monitor set sentry={1} where id={0}".format(sentry_id['id'], sentry)
         self.cursor.execute(sql)
         self.conn.commit()
+
 def get_latest_close_price(stock_code):
     # 数据间隔时间为 1 分钟
     freq = 1
     # 获取最新一个交易日的分钟级别股票行情数据
     df = None
+    now = datetime.now()
+    formatted_date = now.strftime("%Y%m%d")
     try:
-     df = ef.stock.get_quote_history(stock_code, klt=freq)
+     df = ef.stock.get_quote_history(stock_code, beg = formatted_date,
+                      end = formatted_date,  klt=freq)
     except Exception as e:
         return None
     if len(df) < 0:
@@ -88,6 +95,91 @@ def send_mail(stock_code, stock_name, current_close_price, margin_price, mode):
     smtp.close()
     print("发送邮件成功！！")
 
+def select_all_valid_stock(connection):
+    """查询所有用户"""
+    with connection.cursor() as cursor:
+        sql = "select * from stock_db.stock_elf where status = 1"
+        cursor.execute(sql)
+        return cursor.fetchall()
+
+def get_sentry_id(connection, cdate):
+    """查询所有用户"""
+    with connection.cursor() as cursor:
+        sql = "select id from sentry_monitor   where cdate = \'{0}\'".format(cdate)
+        cursor.execute(sql)
+        return cursor.fetchone()
+
+def insert_sentry(connection, cdate, sentry):
+    sql = "insert into sentry_monitor(`sentry`, cdate) VALUES({0},'{1}')".format(sentry, cdate)
+    with connection.cursor() as cursor:
+        cursor.execute(sql)
+        connection.commit()
+
+def update_sentry(connection, sentry_id, sentry):
+    sql = "update stock_db.sentry_monitor set sentry={1} where id={0}".format(sentry_id['id'], sentry)
+    with connection.cursor() as cursor:
+        cursor.execute(sql)
+        connection.commit()
+
+def update_stock(connection, stock_code):
+    sql = "update stock_db.stock_elf set status=0, update_at = '{1}' where stock_code='{0}'".format(stock_code, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    with connection.cursor() as cursor:
+        cursor.execute(sql)
+        connection.commit()
+
+#雅虎api请求有限制，2~5秒。否则封锁
+def random_sleep():
+    # 随机延迟2-5秒
+    wait_time = random.uniform(2, 5)
+    time.sleep(wait_time)
+
+def monitor(sentry, config:dict):
+    try:
+        # 连接数据库
+        with pymysql.connect(**config) as connection:
+            print("成功连接到数据库")
+            all_valid_stock = select_all_valid_stock(connection)
+
+            meet_requirements_stock = []
+            for row in all_valid_stock:
+                cur_stock_price = get_latest_close_price(row['stock_code'])
+                if cur_stock_price == None or cur_stock_price < 1.0:
+                    continue
+                print('stock={0}, price={1}'.format(row['stock_code'], cur_stock_price))
+                #下跌到
+                if row['type'] == 'down' and cur_stock_price <= row['margin_price']:
+                    send_mail(row['stock_code'], row['stock_name'], cur_stock_price, row['margin_price'], row['type'])
+                    meet_requirements_stock.append(row['stock_code'])
+                #上涨到
+                if row['type'] == 'up' and cur_stock_price >= row['margin_price']:
+                    send_mail(row['stock_code'], row['stock_name'], cur_stock_price, row['margin_price'], row['type'])
+                    meet_requirements_stock.append(row['stock_code'])
+                random_sleep()
+
+            for ele in meet_requirements_stock:
+                update_stock(connection, ele)
+            meet_requirements_stock = []
+
+            print("***********loop done******************")
+            current_time = datetime.now()
+            formatted_time = int(current_time.strftime("%H"))
+            if formatted_time >= 16 or formatted_time <= 8:
+                time.sleep(60 * 60)
+            else:
+                time.sleep(1)
+            sentry += 1
+
+            cdate = datetime.now().strftime("%Y-%m-%d")
+            sentry_id = get_sentry_id(connection, cdate)
+            if sentry_id == None or sentry_id['id'] == 0:
+                insert_sentry(connection, cdate, sentry)
+            else:
+                update_sentry(connection, sentry_id, sentry)
+
+    except pymysql.Error as e:
+        print(f"数据库错误: {e}")
+    except Exception as e:
+        print(f"其他错误: {e}")
 
 '''
 0 9 * * * /root/elf.sh
@@ -120,37 +212,52 @@ if __name__ == '__main__':
     mysql_query = MySqlQuery(env)
 
     sentry = 0
+
+    localhost = '43.156.232.204' if env == 'local' else '127.0.0.1'
+    config = {
+        'host': localhost,
+        'user': 'root',
+        'password': '897huvcasdef_a',
+        'database': 'stock_db',
+        'charset': 'utf8mb4',
+        'cursorclass': DictCursor  # 使用字典游标，返回的结果是字典形式
+    }
+
     while True:
-
-        mysql_df = mysql_query.query("select * from stock_db.stock_elf")
-        mysql_df = mysql_df[['stock_code',  'status', 'margin_price', 'type', 'stock_name']]
-        filtered_df = mysql_df[mysql_df['status'] == 1]
-
-        for index, row in filtered_df.iterrows():
-            cur_stock_price = get_latest_close_price(row['stock_code'])
-            if cur_stock_price == None or cur_stock_price < 1.0:
-                continue
-            #下跌到
-            if row['type'] == 'down' and cur_stock_price <= row['margin_price']:
-                send_mail(row['stock_code'], row['stock_name'], cur_stock_price, row['margin_price'], row['type'])
-                mysql_query.update(row['stock_code'])
-            #上涨到
-            if row['type'] == 'up' and cur_stock_price >= row['margin_price']:
-                send_mail(row['stock_code'], row['stock_name'], cur_stock_price, row['margin_price'], row['type'])
-                mysql_query.update(row['stock_code'])
-
-        current_time = datetime.now()
-        formatted_time = int(current_time.strftime("%H"))
-        if formatted_time >= 16 or formatted_time <= 8:
-            # time.sleep(60 * 60)
-            time.sleep(60 * 60)
-        else:
-            time.sleep(1)
+        monitor(sentry, config)
         sentry += 1
 
-        cdate = datetime.now().strftime("%Y-%m-%d")
-        sentry_id = mysql_query.get_sentry_id(cdate)
-        if sentry_id == None or sentry_id['id'] == 0:
-            mysql_query.insert_sentry(cdate, sentry)
-        else:
-            mysql_query.update_sentry(sentry_id, sentry)
+        # mysql_df = mysql_query.query("select * from stock_db.stock_elf where status = 1")
+        # mysql_df = mysql_df[['stock_code',  'status', 'margin_price', 'type', 'stock_name']]
+        # filtered_df = mysql_df[mysql_df['status'] == 1]
+        #
+        # for index, row in filtered_df.iterrows():
+        #     cur_stock_price = get_latest_close_price(row['stock_code'])
+        #     if cur_stock_price == None or cur_stock_price < 1.0:
+        #         continue
+        #     print('stock={0}, price={1}'.format(row['stock_code'], cur_stock_price))
+        #     #下跌到
+        #     if row['type'] == 'down' and cur_stock_price <= row['margin_price']:
+        #         send_mail(row['stock_code'], row['stock_name'], cur_stock_price, row['margin_price'], row['type'])
+        #         mysql_query.update(row['stock_code'])
+        #     #上涨到
+        #     if row['type'] == 'up' and cur_stock_price >= row['margin_price']:
+        #         send_mail(row['stock_code'], row['stock_name'], cur_stock_price, row['margin_price'], row['type'])
+        #         mysql_query.update(row['stock_code'])
+        #
+        # print("***********loop done******************")
+        # current_time = datetime.now()
+        # formatted_time = int(current_time.strftime("%H"))
+        # if formatted_time >= 16 or formatted_time <= 8:
+        #     # time.sleep(60 * 60)
+        #     time.sleep(60 * 60)
+        # else:
+        #     time.sleep(1)
+        # sentry += 1
+        #
+        # cdate = datetime.now().strftime("%Y-%m-%d")
+        # sentry_id = mysql_query.get_sentry_id(cdate)
+        # if sentry_id == None or sentry_id['id'] == 0:
+        #     mysql_query.insert_sentry(cdate, sentry)
+        # else:
+        #     mysql_query.update_sentry(sentry_id, sentry)
