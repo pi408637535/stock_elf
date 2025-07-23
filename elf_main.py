@@ -133,6 +133,14 @@ def random_sleep():
     wait_time = random.uniform(2, 5)
     time.sleep(wait_time)
 
+def loop_sleep():
+    current_time = datetime.now()
+    formatted_time = int(current_time.strftime("%H"))
+    if formatted_time >= 16 or formatted_time <= 8:
+        time.sleep(60 * 60)
+    else:
+        time.sleep(10 * 60)
+
 def monitor(sentry, config:dict):
     try:
         # 连接数据库
@@ -143,7 +151,9 @@ def monitor(sentry, config:dict):
             meet_requirements_stock = []
             for row in all_valid_stock:
                 cur_stock_price = get_latest_close_price(row['stock_code'])
+                random_sleep()
                 if cur_stock_price == None or cur_stock_price < 1.0:
+                    print("nothing")
                     continue
                 print('stock={0}, price={1}'.format(row['stock_code'], cur_stock_price))
                 #下跌到
@@ -154,19 +164,13 @@ def monitor(sentry, config:dict):
                 if row['type'] == 'up' and cur_stock_price >= row['margin_price']:
                     send_mail(row['stock_code'], row['stock_name'], cur_stock_price, row['margin_price'], row['type'])
                     meet_requirements_stock.append(row['stock_code'])
-                random_sleep()
+
 
             for ele in meet_requirements_stock:
                 update_stock(connection, ele)
-            meet_requirements_stock = []
 
             print("***********loop done******************")
-            current_time = datetime.now()
-            formatted_time = int(current_time.strftime("%H"))
-            if formatted_time >= 16 or formatted_time <= 8:
-                time.sleep(60 * 60)
-            else:
-                time.sleep(1)
+            loop_sleep()
             sentry += 1
 
             cdate = datetime.now().strftime("%Y-%m-%d")
